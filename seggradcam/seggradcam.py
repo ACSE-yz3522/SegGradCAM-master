@@ -4,6 +4,7 @@ from keras import backend as K
 from skimage import measure
 import matplotlib.pyplot as plt
 from operator import sub
+import tensorflow as tf
 
 
 class SuperRoI:  # or rename it to ClassRoI
@@ -152,29 +153,25 @@ class SegGradCAM:
         self.cam_max = None
 
     def featureMapsGradients(self):
+        preprocessed_input = tf.expand_dims(self.image, 0)
+        
+        # 创建一个新模型，该模型将 input_model 的输入映射到 prop_to_layer 和 prop_from_layer 的输出
+        intermediate_model = tf.keras.models.Model(inputs=self.input_model.input, 
+                                                   outputs=[self.input_model.get_layer(self.prop_to_layer).output, 
+                                                            self.input_model.get_layer(self.prop_from_layer).output])
+        
+        with tf.GradientTape(persistent=True) as tape:
+            # 确保tape会跟踪任何可训练变量的访问
+            tape.watch(intermediate_model.trainable_variables)
+            conv_output, logits_output = intermediate_model(preprocessed_input)
+            y_c = logits_output[..., self.cls] * self.roi.roi
+            loss = tf.reduce_sum(y_c)
 
-        """ This method corresponds to the formula:
-        Sum [(d Sum y^c_ij) / (d A^k_uv)] , where
-        y^c_ij are logits for every pixel 𝑥_𝑖𝑗 and class c. Pixels x_ij are defined by the region of interest M.
-        A^k is a feature map number k. u,v - indexes of pixels of 𝐴^𝑘.
-
-        Return: A, gradients of the logits y with respect to all pixels of each feature map 𝐴^𝑘
-        """
-        preprocessed_input = np.expand_dims(self.image, 0)
-        y_c = self.input_model.get_layer(self.prop_from_layer).output[
-                  ..., self.cls] * self.roi.roi  # Mask the region of interest
-        #print("y_c: ", type(y_c), np.array(y_c))
-        conv_output = self.input_model.get_layer(self.prop_to_layer).output
-        #print("conv_output: ", type(conv_output), np.array(conv_output))
-        grads = K.gradients(y_c, conv_output)[0]
-        #print("grads: ", type(grads), grads)
-
-        # Normalize if necessary
-        # grads = normalize(grads)
-        gradient_function = K.function([self.input_model.input], [conv_output, grads])
-        output, grads_val = gradient_function([preprocessed_input])
-        self.A, self.grads_val = output[0, :], grads_val[0, :, :, :]
-
+        # 计算梯度
+        grads = tape.gradient(loss, conv_output)
+        
+        self.A, self.grads_val = conv_output.numpy()[0, :], grads.numpy()[0, :, :, :]
+        del tape  # 删除tape以释放资源
         return self.A, self.grads_val
 
     def gradientWeights(self):
